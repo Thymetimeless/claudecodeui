@@ -176,7 +176,7 @@ test('a steered message is written into the running turn and shown when Claude r
     script.emit(result());
     await settle();
     assert.ok(sent.some((message) => message.kind === 'complete'));
-    assert.equal(script.released(), true);
+    assert.equal(script.released(), false, 'the process is kept for the next message (keepalive)');
   });
 });
 
@@ -211,7 +211,7 @@ test('a turn that ends before reading a steered message stays open for the follo
 
     assert.equal(userTexts(sent).length, 1);
     assert.equal(sent.filter((message) => message.kind === 'complete').length, 1);
-    assert.equal(script.released(), true);
+    assert.equal(script.released(), false, 'the process is kept for the next message (keepalive)');
   });
 });
 

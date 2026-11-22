@@ -263,7 +263,8 @@ test('a turn that ends while a native side question is pending keeps the input o
     assert.deepEqual(deltas, [NATIVE_ANSWER]);
     assert.equal(fork.calls(), 0, 'the native call answered; the fork never started');
 
-    await waitFor(() => script.released());
+    await settle();
+    assert.equal(script.released(), false, 'the process is kept for the next message (keepalive)');
 
     script.end();
     await done;
@@ -387,8 +388,8 @@ test('a superseded run\'s late task-stopped notification does not release the ru
     await firstRun;
     second.script.emit(init());
     await emitAndFlush(second.script, result());
-    await waitFor(() => second.script.released());
-    assert.equal(second.script.released(), true, 'the new run still releases normally once its own turn ends');
+    await settle();
+    assert.equal(second.script.released(), false, 'the new run is kept for its next message (keepalive)');
     second.script.end();
     await secondRun;
   } finally {
@@ -460,7 +461,8 @@ test('a native side question answered on a superseded run does not touch the pen
     resolveSecondNative({ response: NATIVE_ANSWER, synthetic: false });
     const { outcome: secondOutcome } = await secondAsked;
     assert.deepEqual(secondOutcome, { status: 'done', answer: NATIVE_ANSWER });
-    await waitFor(() => second.script.released());
+    await settle();
+    assert.equal(second.script.released(), false, 'the answered question leaves the run kept for its next message (keepalive)');
 
     first.script.end();
     await firstRun;

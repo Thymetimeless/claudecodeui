@@ -807,6 +807,9 @@ export type ProviderRuntimeContext = {
     stopTask?(taskId: string): Promise<void>;
     /** Switches the running turn's model (plan approval with a picked model). */
     setModel?(model?: string): Promise<void>;
+    /** Keepalive: switch the live process to the next message's permission mode and effort. */
+    setPermissionMode?(mode: string): Promise<void>;
+    applyFlagSettings?(settings: AnyRecord): Promise<void>;
   };
 };
 

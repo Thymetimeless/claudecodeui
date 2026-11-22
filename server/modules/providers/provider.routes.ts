@@ -14,6 +14,7 @@ import { sessionsService } from '@/modules/providers/services/sessions.service.j
 import { claudeMdService } from '@/modules/providers/list/claude/claude-md.js';
 import { splitClaudeAccountModel } from '@/modules/providers/list/claude/claude-accounts.js';
 import { readClaudePlanUsageCached } from '@/modules/providers/list/claude/claude-plan-usage.js';
+import { getClaudeSDKLiveStatus } from '@/modules/providers/list/claude/claude-runtime.provider.js';
 import { sessionsDb } from '@/modules/database/index.js';
 import type {
   CustomProviderModelEffort,
@@ -1079,6 +1080,15 @@ router.get(
   asyncHandler(async (req: Request, res: Response) => {
     const model = typeof req.query.model === 'string' ? req.query.model : '';
     res.json(createApiSuccessResponse(await readClaudePlanUsageCached(splitClaudeAccountModel(model).account)));
+  }),
+);
+
+// Whether a Claude session has a live CLI process (keepalive), with its background tasks.
+router.get(
+  '/claude/live',
+  asyncHandler(async (req: Request, res: Response) => {
+    const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : '';
+    res.json(createApiSuccessResponse(getClaudeSDKLiveStatus(sessionId)));
   }),
 );
 

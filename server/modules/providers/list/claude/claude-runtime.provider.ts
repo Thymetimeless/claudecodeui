@@ -101,7 +101,26 @@ type SteerRequest = {
   messageId: string;
 };
 
-type SteerInput = (request: SteerRequest) => Promise<boolean>;
+/** What the next message of a session carries when it is continued in the live process. */
+type ContinueRequest = {
+  command: string;
+  options: AnyRecord;
+  ws: ClaudeRuntimeWriter;
+  sdkOptions: AnyRecord;
+  signature: string;
+};
+
+type LiveState = { idleSince: number | null; busy: boolean; expiresAt: number | null };
+
+/**
+ * The steer entry point of a run, plus its keepalive hooks: `continueTurn` runs
+ * the session's next message in the same CLI process (null when it cannot), and
+ * `liveState` reports whether that process is idle.
+ */
+type SteerInput = ((request: SteerRequest) => Promise<boolean>) & {
+  continueTurn?: (request: ContinueRequest) => Promise<{ done: Promise<void> } | null>;
+  liveState?: () => LiveState;
+};
 
 type ToolApprovalDecision = AnyRecord | null;
 
@@ -400,6 +419,56 @@ export function buildClaudeSdkEnv(hostEnv: NodeJS.ProcessEnv = process.env): Nod
     ...hostEnv,
     CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: String(BG_WAIT_CEILING_MS),
   };
+}
+
+// Keepalive: the CLI process stays up after a turn, like Claude Code in a terminal, and the
+// session's next message runs in it (no start-up wait; background shells and agents keep
+// running). It closes after CLOUDCLI_CLAUDE_KEEPALIVE_MS idle, or when more than
+// CLOUDCLI_CLAUDE_MAX_LIVE sessions are live (oldest idle first).
+const KEEPALIVE_MS = Number(process.env.CLOUDCLI_CLAUDE_KEEPALIVE_MS) || 30 * 60 * 1000;
+const MAX_LIVE_SESSIONS = Number(process.env.CLOUDCLI_CLAUDE_MAX_LIVE) || 3;
+
+/** What a live process cannot change: a message whose signature differs starts a new process. */
+async function spawnSignature(sdkOptions: AnyRecord): Promise<string> {
+  let claudeMd = '';
+  try {
+    claudeMd = crypto.createHash('sha1').update(await fs.readFile(path.join(os.homedir(), '.claude', 'CLAUDE.md'))).digest('hex');
+  } catch {
+    // No CLAUDE.md: nothing to compare.
+  }
+  return JSON.stringify([
+    sdkOptions.env?.CLAUDE_CONFIG_DIR || '', sdkOptions.env?.ANTHROPIC_BASE_URL || '', sdkOptions.cwd || '',
+    sdkOptions.allowedTools || [], sdkOptions.disallowedTools || [], sdkOptions.settings || null, claudeMd,
+  ]);
+}
+
+/** Keeps at most MAX_LIVE_SESSIONS processes by closing the oldest idle ones; busy ones are never closed. */
+function closeIdleSessions(exceptKey: string | null) {
+  const idle: Array<[number, string]> = [];
+  let live = 0;
+  for (const [key, entry] of activeSessions) {
+    if (key === exceptKey || entry.status !== 'active') continue;
+    live++;
+    const state = entry.steerInput?.liveState?.();
+    if (state?.idleSince && !backgroundWork.hasOutstanding(key)) idle.push([state.idleSince, key]);
+  }
+  const over = live - MAX_LIVE_SESSIONS + 1;
+  if (over <= 0) return;
+  idle.sort((a, b) => a[0] - b[0]);
+  for (const [, key] of idle.slice(0, over)) {
+    console.log(`[keepalive] closing idle session ${key} (max ${MAX_LIVE_SESSIONS} live)`);
+    releaseHeldSession(key);
+  }
+}
+
+/** Whether a session has a live CLI process, for the composer's status pill. */
+function getClaudeSDKLiveStatus(sessionId: string) {
+  const entry = sessionId ? getSession(sessionId) : undefined;
+  const state = entry?.status === 'active' ? entry.steerInput?.liveState?.() ?? { idleSince: null, busy: true, expiresAt: null } : null;
+  const tasks = state
+    ? backgroundWork.outstanding(sessionId).map((task: AnyRecord) => ({ taskType: task.taskType, description: task.description }))
+    : [];
+  return { live: Boolean(state), busy: Boolean(state?.busy), expiresAt: state?.expiresAt ?? null, tasks };
 }
 
 function mapCliOptionsToSDK(options: AnyRecord = {}) {
@@ -1196,7 +1265,8 @@ async function queryClaudeSDK(
   ws: ClaudeRuntimeWriter,
   context: ProviderRuntimeContext,
 ): Promise<void> {
-  const { sessionId, sessionSummary } = options;
+  const { sessionId } = options;
+  let { sessionSummary } = options;
   // Callers pass the stable app session id; the SDK only understands the
   // provider-native id recorded on the session row.
   const providerSessionId = context.resolveProviderSessionId(sessionId);
@@ -1246,6 +1316,18 @@ async function queryClaudeSDK(
   // True while the process is being held open for background work, so a later
   // `result` can be recognised as that work reporting back.
   let heldForBackgroundWork = false;
+  // Keepalive: when the last turn ended (null while one runs), the callers waiting for a
+  // continued turn's end, whether the CLI is inside a turn (init .. result), and how many
+  // results belong to a follow-up turn that was running when a message was continued.
+  let idleSince: number | null = null;
+  let turnWaiters: Array<() => void> = [];
+  let cliBusy = false;
+  let skipResults = 0;
+  const settleTurnWaiters = () => {
+    const waiters = turnWaiters;
+    turnWaiters = [];
+    for (const resolve of waiters) resolve();
+  };
   // Set once a turn publishes a budget read from an assistant message, so the
   // turn-ending `result` is only mined for usage when nothing better arrived.
   let assistantBudgetSent = false;
@@ -1256,12 +1338,6 @@ async function queryClaudeSDK(
   let reportedContextWindow: number | null = getReportedClaudeContextWindow(providerSessionId) ?? null;
   let mainThreadModel: string | null = null;
   let lastSentTokenBudget: TokenBudget | null = null;
-
-  // A new turn supersedes any earlier one still holding this session's process
-  // open, so held runs cannot stack up across a conversation.
-  if (sessionKey()) {
-    releaseHeldSession(sessionKey()!);
-  }
 
   // Closes the held stdin, going through the activeSessions entry so
   // `inputReleased` is set accurately for `askSideQuestion`'s own check —
@@ -1319,7 +1395,7 @@ async function queryClaudeSDK(
     idleReleaseTimer = setTimeout(() => {
       idleReleaseTimer = null;
       maybeReleasePromptStream(true);
-    }, BG_WAIT_CEILING_MS);
+    }, idleSince ? KEEPALIVE_MS : BG_WAIT_CEILING_MS);
     // Never let the hold keep the server process alive on its own.
     idleReleaseTimer?.unref?.();
   };
@@ -1368,10 +1444,9 @@ async function queryClaudeSDK(
       effortModels,
     });
 
-    const mcpServers = await loadMcpConfig(options.cwd);
-    if (mcpServers) {
-      sdkOptions.mcpServers = mcpServers;
-    }
+    // MCP servers come from the CLI's own settings (settingSources): passing them again as
+    // `mcpServers` makes the CLI wait for every server to connect before each turn, reads only
+    // ~/.claude.json, and ignores the servers disabled with /mcp.
 
     // Makes the CLI echo each message it reads from stdin, at the moment it
     // reads it. For a steered message that echo is the only word on when — and
@@ -1382,6 +1457,25 @@ async function queryClaudeSDK(
     // Every turn uses streaming input so stdin stays open past the turn's
     // `result`. The message list is reusable, but each query attempt needs its
     // own stream because an async generator cannot be replayed once consumed.
+    // Keepalive: run this message in the session's live process when nothing it cannot change
+    // differs; otherwise release that process (stopping its background work) and start one.
+    const signature = await spawnSignature(sdkOptions);
+    {
+      const held = sessionKey() ? getSession(sessionKey()!) : undefined;
+      const continueTurn = held?.status === 'active' ? held.steerInput?.continueTurn : undefined;
+      if (continueTurn && !options.resumeAnchorId && !options.resumeFromScratch) {
+        const continued = await continueTurn({ command, options, ws, sdkOptions, signature });
+        if (continued) {
+          await continued.done;
+          return;
+        }
+      }
+      if (sessionKey()) {
+        releaseHeldSession(sessionKey()!);
+      }
+      closeIdleSessions(sessionKey());
+    }
+
     const promptMessages = await buildPromptMessages(command, options.images, options.files, options.cwd);
 
     sdkOptions.hooks = {
@@ -1604,6 +1698,67 @@ async function queryClaudeSDK(
       });
     }
 
+    steerIntoTurn.liveState = () => ({
+      idleSince,
+      busy: !turnCompleteSent || cliBusy,
+      expiresAt: idleSince ? idleSince + KEEPALIVE_MS : null,
+    });
+    steerIntoTurn.continueTurn = async ({ command: nextCommand, options: nextOptions, ws: nextWs, sdkOptions: next, signature: nextSignature }) => {
+      if (!turnCompleteSent || nextSignature !== signature || pendingSteerIds.size > 0) {
+        return null;
+      }
+      const [nextMessage] = await buildPromptMessages(nextCommand, nextOptions.images, nextOptions.files, nextOptions.cwd);
+      if (!nextMessage || !turnCompleteSent || !queryInstance) {
+        return null;
+      }
+      const live = queryInstance;
+      try {
+        if (!live.setModel || !live.setPermissionMode || !live.applyFlagSettings) {
+          throw new Error('this SDK cannot switch a live process');
+        }
+        if (next.model && next.model !== sdkOptions.model) {
+          await live.setModel(next.model);
+          sdkOptions.model = next.model;
+        }
+        if ((next.permissionMode || 'default') !== (sdkOptions.permissionMode || 'default')) {
+          await live.setPermissionMode(next.permissionMode || 'default');
+          sdkOptions.permissionMode = next.permissionMode;
+        }
+        if ((next.effort ?? null) !== (sdkOptions.effort ?? null)) {
+          await live.applyFlagSettings({ effortLevel: next.effort ?? null });
+          sdkOptions.effort = next.effort;
+        }
+      } catch (error: any) {
+        console.warn('[keepalive] could not switch the live process, starting a new one:', error?.message || error);
+        return null;
+      }
+      if (!turnCompleteSent || !pushPromptMessage({ ...nextMessage, uuid: crypto.randomUUID() })) {
+        return null;
+      }
+      // Nothing below awaits, so the run loop sees the new turn's state before any of its messages.
+      ws = nextWs;
+      options = nextOptions;
+      sessionSummary = nextOptions.sessionSummary ?? sessionSummary;
+      const entry = getSession(sessionKey()!);
+      if (entry?.instance === queryInstance) {
+        entry.writer = nextWs;
+      }
+      if (capturedSessionId && typeof ws.setSessionId === 'function') {
+        ws.setSessionId(capturedSessionId);
+      }
+      turnCompleteSent = false;
+      assistantBudgetSent = false;
+      backgroundWorkPending = false;
+      sawTaskEventThisTurn = false;
+      idleSince = null;
+      skipResults = cliBusy ? 1 : 0;
+      if (idleReleaseTimer) {
+        clearTimeout(idleReleaseTimer);
+        idleReleaseTimer = null;
+      }
+      return { done: new Promise<void>((resolve) => turnWaiters.push(resolve)) };
+    };
+
     // Track the query instance for abort capability
     if (sessionKey()) {
       addSession(sessionKey()!, queryInstance, ws, releasePromptStream, steerIntoTurn);
@@ -1618,6 +1773,7 @@ async function queryClaudeSDK(
       if (!turnCompleteSent && !abortPending) {
         turnCompleteSent = true;
         ws.send(createCompleteMessage({ provider: 'claude', sessionId: capturedSessionId || sessionId || null, exitCode: 0 }));
+        settleTurnWaiters();
         notifyRunStopped({
           userId: ws?.userId || null,
           provider: 'claude',
@@ -1660,11 +1816,11 @@ async function queryClaudeSDK(
         scheduleRelease();
       } else {
         // Either nothing was backgrounded, or the background work just
-        // reported in — let the CLI exit now, as it always has (unless a
-        // native side question is still in flight; see
-        // `maybeReleasePromptStream`).
+        // reported in — keep the process for the session's next message
+        // until it has been idle for KEEPALIVE_MS.
         heldForBackgroundWork = false;
-        maybeReleasePromptStream();
+        idleSince = Date.now();
+        scheduleRelease();
       }
     };
 
@@ -1819,10 +1975,20 @@ async function queryClaudeSDK(
         && !backgroundWork.hasOutstanding(sessionKey()!)
       ) {
         heldForBackgroundWork = false;
-        maybeReleasePromptStream();
+        idleSince = Date.now();
+        scheduleRelease();
       }
 
+      if (message.type === 'system' && message.subtype === 'init') {
+        cliBusy = true;
+      }
       if (message.type === 'result') {
+        cliBusy = false;
+      }
+      if (message.type === 'result' && skipResults > 0) {
+        // A follow-up turn (background work reporting in) ended; the continued turn is next.
+        skipResults--;
+      } else if (message.type === 'result') {
         const abortPending = sessionKey() ? abortedSessionIds.has(sessionKey()) : false;
         if (pendingSteerIds.size > 0 && !abortPending) {
           // The turn ended before Claude reached a tool-call boundary, so the
@@ -1934,6 +2100,7 @@ async function queryClaudeSDK(
       steerFollowUpTimer = null;
     }
     releasePromptStream();
+    settleTurnWaiters();
   }
 }
 
@@ -2249,6 +2416,7 @@ export const claudeRuntime = {
 
 // Export public API
 export {
+  getClaudeSDKLiveStatus,
   queryClaudeSDK,
   abortClaudeSDKSession,
   steerClaudeSDKSession,

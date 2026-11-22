@@ -42,6 +42,7 @@ import ComposerPermissionMenu from '@/modules/chat/composer/ComposerPermissionMe
 import ComposerSendMenu from '@/modules/chat/composer/ComposerSendMenu';
 import { ClaudeMdBanner, ClaudeMdMenu } from '@/modules/chat/composer/ClaudeMdControls';
 import { PlanUsageMenu } from '@/modules/chat/composer/PlanUsageMenu';
+import { LiveStatusPill } from '@/modules/chat/composer/LiveStatusPill';
 
 type MentionableFile = {
   name: string;
@@ -70,6 +71,8 @@ type ChatComposerProps = {
   providerLabel: string;
   /** Show the Claude plan usage pill (5h / weekly limits) in the toolbar. */
   showPlanUsage?: boolean;
+  /** App session id, for the live process status pill (Claude only). */
+  sessionId?: string | null;
   effort: string;
   availableEffortOptions: NonNullable<ProviderModelOption['effort']>['values'];
   onSelectEffort: (effort: string) => void;
@@ -159,6 +162,7 @@ export default function ChatComposer({
   onSelectPermissionMode,
   providerLabel,
   showPlanUsage = false,
+  sessionId = null,
   effort,
   availableEffortOptions,
   onSelectEffort,
@@ -540,6 +544,8 @@ export default function ChatComposer({
             <ClaudeMdMenu />
 
             {showPlanUsage && <PlanUsageMenu model={model} />}
+
+            {showPlanUsage && <LiveStatusPill sessionId={sessionId} />}
 
             <ComposerPermissionMenu
               permissionMode={permissionMode}

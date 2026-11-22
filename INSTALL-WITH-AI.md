@@ -71,7 +71,13 @@ paste it to you for that step. Do not install anything system-wide without askin
    starts a new chat that ends with that reply (no setup needed), and that the button with
    percentages in the composer toolbar shows my Claude plan usage (5-hour and weekly) and
    when it resets (no setup needed; it shows `--` while the login token is expired, until the
-   next Claude turn on that account). Remind me not to run
+   next Claude turn on that account). Also mention that a Claude chat now keeps its Claude
+   process between messages, so replies start faster and background commands keep running
+   when I send the next message; the green "Live" dot in the toolbar shows it, and an idle
+   chat closes its process after 30 minutes (at most 3 chats stay live). If I want other
+   values, set `CLOUDCLI_CLAUDE_KEEPALIVE_MS` (milliseconds) and `CLOUDCLI_CLAUDE_MAX_LIVE`
+   in the environment the server starts with. Each live chat keeps its MCP servers running,
+   so ask me about the limit if this machine has little memory. Remind me not to run
    `npm install -g @cloudcli-ai/cloudcli`, which installs the original app without these
    changes.
 ````

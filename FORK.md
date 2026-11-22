@@ -68,6 +68,33 @@ Please report problems with the changes below to this fork, not to the upstream 
   account. API: `GET /api/providers/claude/plan-usage?model=<model value>` returns
   `{ state: 'ok', fiveHour, sevenDay, sevenDayOpus }` (each `{ pct, resetsAt }` or null) or
   `{ state: 'unavailable' | 'nologin' | 'expired' | 'error', status? }`.
+- **Claude keeps running between messages (like a terminal).** Upstream closes the Claude CLI
+  process after every turn, so each message started a new one, and a message sent while a
+  background shell or agent was still running stopped it. Now the process stays up after a
+  turn and the chat's next message goes into it: no start-up wait, and background work keeps
+  running and reports back. Model, permission mode and effort are switched in the live
+  process; a message that needs another process (another account / config dir, another
+  base URL, another project folder, changed allowed/disallowed tools or Ultracode, a changed
+  `~/.claude/CLAUDE.md`, or editing an earlier message) starts a new one as before. Stop
+  still ends the process. An idle process closes after 30 minutes, and at most 3 chats keep
+  a live process (the one idle the longest closes first; a busy one never). Both are
+  settings: `CLOUDCLI_CLAUDE_KEEPALIVE_MS` (default `1800000`) and `CLOUDCLI_CLAUDE_MAX_LIVE`
+  (default `3`) in the server's environment. A live process does not see changes to
+  settings, plugins, skills or MCP servers until it restarts, the same as Claude Code in a
+  terminal.
+- **Faster turns: MCP servers come from Claude's own settings.** Upstream also passed every
+  MCP server from `~/.claude.json` to the CLI again (`mcpServers`). Servers passed that way
+  make the CLI wait until every one of them has connected before it reads the message (10+
+  seconds with a dozen servers), it read only `~/.claude.json` (not `$CLAUDE_CONFIG_DIR`),
+  and it started servers disabled with `/mcp`. The CLI loads the same servers itself, so
+  they are no longer passed. A slow server may join a moment after the first message of a
+  new process.
+- **Live status in the composer toolbar** (Claude chats only): `● Live` (green) while the
+  chat's process is up, with its background work (`● Live · 1 shell`); `● Sleeping` (grey)
+  when the next message has to start one. The tooltip says when an idle process closes.
+  Only the dot on phones. Polled every 5 s while the tab is visible. API:
+  `GET /api/providers/claude/live?sessionId=<app session id>` returns
+  `{ live, busy, expiresAt, tasks: [{ taskType, description }] }`.
 - **Slash commands keep your draft.** Picking a built-in command (such as `/usage` or `/cost`)
   from the slash menu while you are writing a message removes only the `/command` you typed;
   the rest of the draft stays. Typing a command alone and pressing Enter still clears the box.

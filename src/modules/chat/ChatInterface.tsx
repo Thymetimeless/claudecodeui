@@ -559,6 +559,7 @@ function ChatInterface({
           onSelectPermissionMode={selectPermissionMode}
           providerLabel={selectedProviderLabel}
           showPlanUsage={provider === 'claude'}
+          sessionId={currentSessionId || selectedSession?.id || null}
           effort={currentProviderEffort}
           availableEffortOptions={currentProviderEffortOptions}
           onSelectEffort={handleSelectComposerEffort}

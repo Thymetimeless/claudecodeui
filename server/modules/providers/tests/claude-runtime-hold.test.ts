@@ -7,6 +7,7 @@ import test from 'node:test';
 import { ClaudeSessionsProvider } from '@/modules/providers/list/claude/claude-sessions.provider.js';
 import { CLAUDE_PREDEFINED_MODELS } from '@/modules/providers/list/claude/claude-models.provider.js';
 import {
+  getClaudeSDKLiveStatus,
   listClaudeSDKBackgroundWork,
   queryClaudeSDK,
   stopClaudeSDKTask,
@@ -15,8 +16,9 @@ import type { NormalizedMessage, ProviderRuntimeContext } from '@/shared/types.j
 
 /**
  * The runtime keeps the CLI's stdin open after a turn's `result` while the
- * turn's background work is outstanding, and lets go when that work has
- * reported. These drive `queryClaudeSDK` with a scripted SDK stream — the
+ * turn's background work is outstanding, and afterwards keeps the process for
+ * the session's next message (keepalive) until it has been idle for
+ * CLOUDCLI_CLAUDE_KEEPALIVE_MS. These drive `queryClaudeSDK` with a scripted SDK stream — the
  * seam is `context.createQuery` — and watch the held prompt stream: the CLI
  * exits when it ends, so "released" is the whole outcome.
  */
@@ -29,6 +31,8 @@ type Scripted = {
   end: () => void;
   released: () => boolean;
   stopped: string[];
+  /** Every message the CLI read from its stdin. */
+  prompts: Array<Record<string, unknown>>;
 };
 
 /** A stand-in for the SDK query: yields what the test emits, and reads the held prompt to notice its release. */
@@ -37,17 +41,19 @@ function createScriptedQuery(): { createQuery: NonNullable<ProviderRuntimeContex
   let wake: (() => void) | null = null;
   let released = false;
   const stopped: string[] = [];
+  const prompts: Array<Record<string, unknown>> = [];
 
   const script: Scripted = {
     emit: (message) => { queue.push(message); wake?.(); },
     end: () => { queue.push(null); wake?.(); },
     released: () => released,
     stopped,
+    prompts,
   };
 
   const createQuery: NonNullable<ProviderRuntimeContext['createQuery']> = ({ prompt }) => {
     void (async () => {
-      for await (const _message of prompt) { /* the CLI reads its stdin */ }
+      for await (const message of prompt) { prompts.push(message as Record<string, unknown>); }
       released = true;
     })();
 
@@ -131,14 +137,14 @@ const taskNotification = (taskId: string, toolUseId: string, status: string) => 
 });
 const result = () => ({ type: 'result', subtype: 'success', session_id: NATIVE_ID, result: 'launched', duration_ms: 1, num_turns: 1 });
 
-test('stopping the last outstanding task releases the held process', async () => {
+test('stopping the last outstanding task leaves the process idle for the next message', async () => {
   await withRun(async ({ script, sent, done }) => {
     script.emit(init());
     script.emit(toolUse('toolu_wf', 'Workflow', { script: 'export const meta = {}' }));
     script.emit(taskStarted('wf1', 'toolu_wf', 'local_workflow'));
     script.emit(ack('toolu_wf', 'Workflow launched in background. Task ID: wf1', { status: 'async_launched', taskId: 'wf1', taskType: 'local_workflow' }));
     script.emit(result());
-    await settle();
+    await waitFor(() => sent.some((message) => message.kind === 'complete'));
 
     // The turn is over for the client, the process is held for the workflow.
     assert.ok(sent.some((message) => message.kind === 'complete'));
@@ -153,7 +159,11 @@ test('stopping the last outstanding task releases the held process', async () =>
     await settle();
 
     assert.deepEqual(listClaudeSDKBackgroundWork(), []);
-    assert.equal(script.released(), true, 'the process is let go once nothing is outstanding');
+    assert.equal(script.released(), false, 'nothing is outstanding: the process waits for the next message');
+    const status = getClaudeSDKLiveStatus(SESSION_ID);
+    assert.equal(status.live, true);
+    assert.equal(status.busy, false);
+    assert.ok(status.expiresAt && status.expiresAt > Date.now(), 'an idle process has a close time');
     void done;
   });
 });
@@ -175,11 +185,12 @@ test('a task that reported completed keeps the hold for the turn that relays its
 
     script.emit(result());
     await settle();
-    assert.equal(script.released(), true, 'the follow-up turn\'s result ends the hold');
+    assert.equal(script.released(), false, 'after the follow-up turn the process waits for the next message');
+    assert.deepEqual(listClaudeSDKBackgroundWork(), []);
   });
 });
 
-test('an agent that ran in the foreground and settled before the result does not hold the process', async () => {
+test('an agent that ran in the foreground and settled before the result holds nothing in the background', async () => {
   await withRun(async ({ script }) => {
     // An Agent call without `run_in_background` is scored as background by
     // the static rule, but the CLI ran it in the foreground: its task started
@@ -193,13 +204,16 @@ test('an agent that ran in the foreground and settled before the result does not
     await settle();
 
     assert.deepEqual(listClaudeSDKBackgroundWork(), []);
-    assert.equal(script.released(), true, 'nothing is outstanding, so nothing to hold for');
+    assert.equal(getClaudeSDKLiveStatus(SESSION_ID).tasks.length, 0, 'nothing is outstanding');
+    assert.equal(script.released(), false, 'the idle process is kept for the next message');
   });
 });
 
-test('a new turn stops the tasks the held process still has going before letting it go', async () => {
+test('a new turn that needs a new process stops the held tasks before letting it go', async () => {
   // Two runs on one session, each with its own scripted CLI: the first is
-  // held for a background agent, the second is the user's next message.
+  // held for a background agent, the second is the user's next message. The
+  // scripted query cannot switch a live process (no setModel), so the second
+  // message needs a new process.
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'claude-runtime-hold-'));
   const first = createScriptedQuery();
   const second = createScriptedQuery();
@@ -230,7 +244,7 @@ test('a new turn stops the tasks the held process still has going before letting
     // the agent runs. The stop has to reach it before stdin ends, because the
     // SDK drops control requests written to an ended stdin.
     const secondRun = queryClaudeSDK('Continue', { sessionId: SESSION_ID, cwd }, writer as never, { ...context, createQuery: second.createQuery });
-    await settle();
+    await waitFor(() => first.script.released());
     assert.deepEqual(first.script.stopped, ['a1'], 'the held process is told to stop its agent');
     assert.equal(first.script.released(), true, 'and is then let go');
     assert.deepEqual(second.script.stopped, [], 'the new process is untouched');
@@ -281,7 +295,7 @@ test('a held process is still let go when stopping its tasks throws', async () =
     assert.equal(first.script.released(), false, 'the first process is held for its agent');
 
     const secondRun = queryClaudeSDK('Continue', { sessionId: SESSION_ID, cwd }, writer as never, { ...context, createQuery: second.createQuery });
-    await settle();
+    await waitFor(() => first.script.released());
     assert.equal(first.script.released(), true, 'the held process is let go anyway');
 
     first.script.end();
@@ -290,6 +304,7 @@ test('a held process is still let go when stopping its tasks throws', async () =
     second.script.emit(result());
     second.script.end();
     await secondRun;
+    await waitFor(() => second.script.released());
     assert.equal(second.script.released(), true, 'the new turn ran to completion');
   } finally {
     await rm(cwd, { recursive: true, force: true });
@@ -306,4 +321,60 @@ test('a turn whose tool emits no task events still holds on the static rule', as
 
     assert.equal(script.released(), false, 'Monitor reports no task, so the launch rule decides');
   });
+});
+
+test('the next message runs in the live process and keeps its background work', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'claude-runtime-hold-'));
+  const first = createScriptedQuery();
+  const switched: string[] = [];
+  const sent: NormalizedMessage[] = [];
+  const writer = { send: (message: NormalizedMessage) => { sent.push(message); }, userId: null };
+  const sessions = new ClaudeSessionsProvider({ getLiveRunStartTime: () => null });
+  const context: ProviderRuntimeContext = {
+    resolveProviderSessionId: () => null,
+    resolveResumeModel: async () => undefined,
+    getProviderModels: async () => CLAUDE_PREDEFINED_MODELS as never,
+    normalizeMessage: (raw, sessionId) => sessions.normalizeMessage(raw, sessionId),
+    isProviderInstalled: async () => true,
+    // A CLI that can switch model, permission mode and effort in place.
+    createQuery: (options) => Object.assign(first.createQuery(options), {
+      setModel: async (model?: string) => { switched.push(`model:${model}`); },
+      setPermissionMode: async (mode: string) => { switched.push(`mode:${mode}`); },
+      applyFlagSettings: async (settings: Record<string, unknown>) => { switched.push(`effort:${String(settings.effortLevel)}`); },
+    }),
+  };
+  const noNewProcess: NonNullable<ProviderRuntimeContext['createQuery']> = () => { throw new Error('a new process was started'); };
+
+  try {
+    const firstRun = queryClaudeSDK('start a shell', { sessionId: SESSION_ID, cwd }, writer as never, context);
+    await settle();
+    first.script.emit(init());
+    first.script.emit(toolUse('toolu_bash', 'Bash', { command: 'sleep 60', run_in_background: true }));
+    first.script.emit(taskStarted('b1', 'toolu_bash', 'local_bash'));
+    first.script.emit(ack('toolu_bash', 'Command running in background', { backgroundTaskId: 'b1' }));
+    first.script.emit(result());
+    await waitFor(() => sent.filter((message) => message.kind === 'complete').length === 1);
+    assert.deepEqual(getClaudeSDKLiveStatus(SESSION_ID).tasks.map((task) => task.taskType), ['local_bash']);
+
+    const secondRun = queryClaudeSDK('next', { sessionId: SESSION_ID, cwd, model: 'opus', permissionMode: 'acceptEdits' }, writer as never, { ...context, createQuery: noNewProcess });
+    await waitFor(() => first.script.prompts.length === 2);
+    assert.deepEqual(first.script.stopped, [], 'the shell keeps running');
+    assert.equal(first.script.released(), false);
+    assert.ok(switched.includes('mode:acceptEdits'), 'the permission mode is switched in place');
+    assert.ok(switched.some((entry) => entry.startsWith('model:')), 'the model is switched in place');
+    assert.equal(getClaudeSDKLiveStatus(SESSION_ID).busy, true);
+
+    first.script.emit(init());
+    first.script.emit(result());
+    await secondRun;
+    assert.equal(sent.filter((message) => message.kind === 'complete').length, 2, 'the continued turn reports its own end');
+    assert.equal(getClaudeSDKLiveStatus(SESSION_ID).busy, false);
+
+    first.script.emit(taskNotification('b1', 'toolu_bash', 'stopped'));
+    first.script.end();
+    await firstRun;
+    assert.equal(getClaudeSDKLiveStatus(SESSION_ID).live, false, 'no process, no live status');
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
 });
