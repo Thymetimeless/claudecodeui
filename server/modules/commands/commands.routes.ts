@@ -4,7 +4,7 @@ import path from "path";
 import express from "express";
 
 import { parseFrontMatter } from "../../shared/frontmatter.js";
-import { splitClaudeAccountModel } from "@/modules/providers/index.js";
+import { planUsageRows, readClaudePlanUsage, splitClaudeAccountModel } from "@/modules/providers/index.js";
 
 type CommandsRouterDependencies = {
   fileSystem: typeof import('node:fs/promises');
@@ -234,61 +234,6 @@ const builtInCommands = [
  * Built-in command handlers
  * Each handler returns { type: 'builtin', action: string, data: any }
  */
-/**
- * Plan usage rows (5-hour and weekly windows) for the Claude login of this
- * machine, read from the CLI's own credentials file. Read-only: an expired
- * token is reported, never refreshed here, so the CLI's login is not touched.
- * Uses the same unofficial endpoint as the CLI's /usage; it may change.
- */
-const readClaudePlanUsage = async (account) => {
-  const accountEnv = account?.env || {};
-  if (accountEnv.ANTHROPIC_BASE_URL || accountEnv.ANTHROPIC_API_KEY || accountEnv.ANTHROPIC_AUTH_TOKEN) {
-    return [{ label: "Plan usage", value: "Not available for this account" }];
-  }
-  let oauth;
-  if (accountEnv.CLAUDE_CODE_OAUTH_TOKEN) {
-    oauth = { accessToken: accountEnv.CLAUDE_CODE_OAUTH_TOKEN };
-  } else {
-    const configDir = account?.configDir
-      || (globalThis.process?.env?.CLAUDE_CONFIG_DIR || "").trim()
-      || path.join(os.homedir(), ".claude");
-    try {
-      oauth = JSON.parse(await fs.readFile(path.join(configDir, ".credentials.json"), "utf8"))?.claudeAiOauth;
-    } catch {
-      oauth = null;
-    }
-  }
-  if (!oauth?.accessToken) {
-    return [{ label: "Plan usage", value: "No Claude login found" }];
-  }
-  if (Number(oauth.expiresAt || 0) && Number(oauth.expiresAt) < Date.now()) {
-    return [{ label: "Plan usage", value: "Login expired: run claude once to refresh it" }];
-  }
-  try {
-    const res = await fetch("https://api.anthropic.com/api/oauth/usage", {
-      headers: { Authorization: "Bearer " + oauth.accessToken },
-    });
-    if (!res.ok) {
-      return [{ label: "Plan usage", value: "Unavailable (HTTP " + res.status + ")" }];
-    }
-    const usage = await res.json();
-    const rows = [];
-    const addBucket = (label, bucket) => {
-      if (bucket && typeof bucket.utilization === "number") {
-        const reset = new Date(bucket.resets_at);
-        const resetText = Number.isNaN(reset.getTime()) ? "" : " \u00b7 resets " + reset.toLocaleString();
-        rows.push({ label, value: Math.round(bucket.utilization) + "%" + resetText });
-      }
-    };
-    addBucket("Current session (5h)", usage.five_hour);
-    addBucket("This week (all models)", usage.seven_day);
-    addBucket("This week (Opus)", usage.seven_day_opus);
-    return rows.length ? rows : [{ label: "Plan usage", value: "No active limits" }];
-  } catch {
-    return [{ label: "Plan usage", value: "Unavailable" }];
-  }
-};
-
 const builtInHandlers = {
   "/help": async (args, context) => {
     const helpText = `# Claude Code Commands
@@ -424,7 +369,7 @@ Custom commands can be created in:
     const provider = readModelProvider(context?.provider);
     const model = provider === "claude" ? await resolveCommandModel(providerModelsService, provider, context) : null;
     const planUsage = provider === "claude"
-      ? await readClaudePlanUsage(splitClaudeAccountModel(model).account)
+      ? planUsageRows(await readClaudePlanUsage(splitClaudeAccountModel(model).account))
       : [{ label: "Plan usage", value: "Only available for Claude" }];
     return { ...base, command: "/usage", data: { ...base.data, planUsage } };
   },

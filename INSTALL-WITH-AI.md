@@ -68,7 +68,10 @@ paste it to you for that step. Do not install anything system-wide without askin
    needs any setup. Also mention the plan card: while a plan waits, a message I type changes
    the plan instead of being queued, and the model button on the card picks the model that
    builds it. Also mention that a Claude reply has a fork button (branch icon) under it, which
-   starts a new chat that ends with that reply (no setup needed). Remind me not to run
+   starts a new chat that ends with that reply (no setup needed), and that the button with
+   percentages in the composer toolbar shows my Claude plan usage (5-hour and weekly) and
+   when it resets (no setup needed; it shows `--` while the login token is expired, until the
+   next Claude turn on that account). Remind me not to run
    `npm install -g @cloudcli-ai/cloudcli`, which installs the original app without these
    changes.
 ````

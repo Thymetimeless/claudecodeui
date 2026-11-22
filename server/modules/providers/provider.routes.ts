@@ -12,6 +12,8 @@ import { sessionConversationsSearchService } from '@/modules/providers/services/
 import { sideQuestionsService } from '@/modules/providers/services/side-questions.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
 import { claudeMdService } from '@/modules/providers/list/claude/claude-md.js';
+import { splitClaudeAccountModel } from '@/modules/providers/list/claude/claude-accounts.js';
+import { readClaudePlanUsageCached } from '@/modules/providers/list/claude/claude-plan-usage.js';
 import { sessionsDb } from '@/modules/database/index.js';
 import type {
   CustomProviderModelEffort,
@@ -1068,6 +1070,15 @@ router.post(
       sessionsDb.setSessionClaudeMd(sessionId, name);
     }
     res.json(createApiSuccessResponse(result));
+  }),
+);
+
+// 5h / weekly plan usage of the account in the composer's model value (`claude2:opus` -> account claude2).
+router.get(
+  '/claude/plan-usage',
+  asyncHandler(async (req: Request, res: Response) => {
+    const model = typeof req.query.model === 'string' ? req.query.model : '';
+    res.json(createApiSuccessResponse(await readClaudePlanUsageCached(splitClaudeAccountModel(model).account)));
   }),
 );
 

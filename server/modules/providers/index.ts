@@ -10,6 +10,7 @@ export { providerModelsService } from './services/provider-models.service.js';
 // splitClaudeAccountModel: used by Commands (/usage) to read the plan usage of the session's Claude account.
 export { splitClaudeAccountModel } from './list/claude/claude-accounts.js';
 export { claudeMdService } from './list/claude/claude-md.js';
+export { planUsageRows, readClaudePlanUsage } from './list/claude/claude-plan-usage.js';
 
 // sessionsService: used by the websocket module's chat gateway to resolve an
 // edited message's resume point, which only the providers module can read.

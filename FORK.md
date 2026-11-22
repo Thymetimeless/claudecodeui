@@ -58,6 +58,16 @@ Please report problems with the changes below to this fork, not to the upstream 
   `~/.claude/.credentials.json` (or `$CLAUDE_CONFIG_DIR`), only reads it, and never refreshes
   or rewrites the login. It uses the same **unofficial** endpoint as the Claude CLI's own
   `/usage`, so it can stop working at any time.
+- **Plan usage in the composer toolbar** (Claude chats only): a small button next to the
+  CLAUDE.md button shows the 5-hour and weekly use of the chat's Claude account and when the
+  5-hour window resets (`5h 64% ↻06:20 · 7d 27%`; only the 5-hour percentage on phones),
+  green / amber (70%+) / red (90%+). Clicking it lists both windows with their reset times.
+  Same source and same read-only rule as `/usage`: an expired token shows `--` until the CLI
+  refreshes it on that account's next turn. Hidden for accounts that use an API key or
+  another base URL. Polled every 90 s while the tab is visible; the server caches 60 s per
+  account. API: `GET /api/providers/claude/plan-usage?model=<model value>` returns
+  `{ state: 'ok', fiveHour, sevenDay, sevenDayOpus }` (each `{ pct, resetsAt }` or null) or
+  `{ state: 'unavailable' | 'nologin' | 'expired' | 'error', status? }`.
 - **Slash commands keep your draft.** Picking a built-in command (such as `/usage` or `/cost`)
   from the slash menu while you are writing a message removes only the `/command` you typed;
   the rest of the draft stays. Typing a command alone and pressing Enter still clears the box.
