@@ -67,6 +67,10 @@ Please report problems with the changes below to this fork, not to the upstream 
   now sends `transcriptAnchorId` (the transcript row uuid) on Claude reply text messages too,
   not only on user messages; `POST /api/providers/sessions/:id/fork` with that id as
   `upToAnchorId` is unchanged. Editing stays on user messages only.
+- **Editing a sent message works with newer Claude Code (2.1.329+).** That CLI writes an
+  attachment row after each reply and parents the next prompt on it, while an edit resumes at
+  the reply itself, so the history read showed the old turns again with the edit at the
+  bottom. Prompts are now grouped by their parent with attachment rows skipped.
 - **Session titles**: a first or last message that is only a slash command (such as `/model`)
   is not used as the session name.
 - **Running timer** counts the current turn of a terminal Claude session, not the time since

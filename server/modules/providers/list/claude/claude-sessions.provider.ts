@@ -633,16 +633,40 @@ function indexNewestRowPerBranch(rows: AnyRecord[]): Map<string, number> {
  * delete tool output from every transcript in the app.
  */
 function dropSupersededPromptBranches(rows: AnyRecord[]): AnyRecord[] {
+  const byUuid = new Map<string, AnyRecord>();
+  for (const row of rows) {
+    if (typeof row.uuid === 'string') {
+      byUuid.set(row.uuid, row);
+    }
+  }
+  // The CLI writes an attachment after a reply (2.1.329: `prompt_snapshot`) and
+  // the next prompt parents on it, while an edit resumes at the reply itself.
+  // Skipping attachments puts both prompts under the same branch point.
+  const branchPointOf = (parentUuid: string): string => {
+    const seen = new Set<string>();
+    let cursor = parentUuid;
+    while (!seen.has(cursor)) {
+      seen.add(cursor);
+      const parent = byUuid.get(cursor);
+      if (parent?.type !== 'attachment' || typeof parent.parentUuid !== 'string') {
+        break;
+      }
+      cursor = parent.parentUuid;
+    }
+    return cursor;
+  };
+
   const promptSiblings = new Map<string, AnyRecord[]>();
   for (const row of rows) {
     if (typeof row.parentUuid !== 'string' || !isUserPromptRow(row)) {
       continue;
     }
-    const siblings = promptSiblings.get(row.parentUuid);
+    const branchPoint = branchPointOf(row.parentUuid);
+    const siblings = promptSiblings.get(branchPoint);
     if (siblings) {
       siblings.push(row);
     } else {
-      promptSiblings.set(row.parentUuid, [row]);
+      promptSiblings.set(branchPoint, [row]);
     }
   }
 

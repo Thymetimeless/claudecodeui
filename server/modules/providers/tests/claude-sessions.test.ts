@@ -1520,6 +1520,50 @@ test('an edited prompt replaces the one it superseded instead of stacking on it'
   }
 });
 
+test('an edit replaces the prompt that hung off an attachment after the reply', { concurrency: false }, async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'claude-edit-attachment-'));
+  const sessionId = 'claude-edit-attachment-session';
+
+  try {
+    const transcriptPath = path.join(tempRoot, `${sessionId}.jsonl`);
+    const row = (type: string, uuid: string, parentUuid: string | null, second: number, extra: Record<string, unknown>) => ({
+      type, uuid, parentUuid, sessionId, timestamp: `2026-11-22T18:00:${String(second).padStart(2, '0')}.000Z`, ...extra,
+    });
+    const user = (text: string) => ({ message: { role: 'user', content: [{ type: 'text', text }] } });
+    const reply = (text: string) => ({ message: { role: 'assistant', model: 'claude-opus-5', content: [{ type: 'text', text }] } });
+    // Shape written by Claude Code 2.1.329: an attachment after every reply,
+    // the next prompt parented on it, the edit parented on the reply.
+    const rows = [
+      row('user', 'u1', null, 1, user('first prompt')),
+      row('assistant', 'a1', 'u1', 2, reply('first answer')),
+      row('attachment', 'att1', 'a1', 3, { attachment: { type: 'prompt_snapshot' } }),
+      row('user', 'u2', 'att1', 4, user('original second prompt')),
+      row('assistant', 'a2', 'u2', 5, reply('answer to be replaced')),
+      row('attachment', 'att2', 'a2', 6, { attachment: { type: 'prompt_snapshot' } }),
+      row('user', 'u2b', 'a1', 7, user('edited second prompt')),
+      row('assistant', 'a2b', 'u2b', 8, reply('answer to the edit')),
+      row('attachment', 'att3', 'a2b', 9, { attachment: { type: 'prompt_snapshot' } }),
+    ];
+    await writeFile(transcriptPath, `${rows.map((entry) => JSON.stringify(entry)).join('\n')}\n`, 'utf8');
+
+    await withIsolatedDatabase(async () => {
+      const now = new Date().toISOString();
+      sessionsDb.createSession(sessionId, 'claude', tempRoot, 'Edited session', now, now, transcriptPath);
+
+      const history = await new ClaudeSessionsProvider().fetchHistory(sessionId, { providerSessionId: sessionId });
+
+      assert.deepEqual(history.messages.map((message) => message.content), [
+        'first prompt',
+        'first answer',
+        'edited second prompt',
+        'answer to the edit',
+      ]);
+    });
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
 const CONCURRENT_SESSION_ID = 'claude-concurrent-session';
 
 /**
