@@ -120,7 +120,8 @@ export const ToolRenderer: React.FC<ToolRendererProps> = memo(({
   // the input render; the separate result section is suppressed in MessageComponent.
   // Files the command changed are listed under the row, outside its collapse, so
   // they read like the Edit rows they stand in for.
-  if (toolName === 'Bash' && mode === 'input') {
+  // PowerShell (Claude's Windows shell tool) is the same interaction, so it shares the row.
+  if ((toolName === 'Bash' || toolName === 'PowerShell') && mode === 'input') {
     const command = typeof parsedData === 'object' && parsedData !== null && 'command' in parsedData
       ? String(parsedData.command || '')
       : typeof toolInput === 'string'
