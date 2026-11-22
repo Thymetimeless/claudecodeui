@@ -1253,7 +1253,9 @@ export class ClaudeSessionsProvider implements IProviderSessions {
     const anchorId = raw?.type !== 'attachment' && typeof raw?.uuid === 'string' && raw.uuid ? raw.uuid : null;
     if (anchorId) {
       for (const message of messages) {
-        if (message.role === 'user') {
+        // A reply text is anchored too, so "fork from here" on it keeps that
+        // answer (`upToMessageId` is inclusive). Editing stays user-only in the UI.
+        if (message.role === 'user' || (message.role === 'assistant' && message.kind === 'text')) {
           message.transcriptAnchorId = anchorId;
         }
       }

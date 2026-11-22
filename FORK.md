@@ -9,7 +9,7 @@ License: AGPL-3.0-or-later, the same as upstream, including the additional terms
 
 Please report problems with the changes below to this fork, not to the upstream project.
 
-## What is changed (2026-11-15)
+## What is changed (2026-11-23)
 
 ### Sidebar
 - **Project menu (⋮).** On desktop, the separate rename and delete buttons on a project row
@@ -61,6 +61,12 @@ Please report problems with the changes below to this fork, not to the upstream 
 - **Slash commands keep your draft.** Picking a built-in command (such as `/usage` or `/cost`)
   from the slash menu while you are writing a message removes only the `/command` you typed;
   the rest of the draft stays. Typing a command alone and pressing Enter still clears the box.
+- **Fork from a reply.** A Claude reply has a "Fork from here" button (branch icon) next to
+  copy. The new chat ends with that reply, so you keep that answer and drop everything after
+  it. The button on your own message still forks up to the prompt only. For this, the server
+  now sends `transcriptAnchorId` (the transcript row uuid) on Claude reply text messages too,
+  not only on user messages; `POST /api/providers/sessions/:id/fork` with that id as
+  `upToAnchorId` is unchanged. Editing stays on user messages only.
 - **Session titles**: a first or last message that is only a slash command (such as `/model`)
   is not used as the session name.
 - **Running timer** counts the current turn of a terminal Claude session, not the time since

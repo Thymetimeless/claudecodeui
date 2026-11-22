@@ -67,7 +67,8 @@ paste it to you for that step. Do not install anything system-wide without askin
    and pointed at another model ID with the pencil in the Model library ("Add model"); neither
    needs any setup. Also mention the plan card: while a plan waits, a message I type changes
    the plan instead of being queued, and the model button on the card picks the model that
-   builds it. Remind me not to run
+   builds it. Also mention that a Claude reply has a fork button (branch icon) under it, which
+   starts a new chat that ends with that reply (no setup needed). Remind me not to run
    `npm install -g @cloudcli-ai/cloudcli`, which installs the original app without these
    changes.
 ````

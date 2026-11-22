@@ -498,6 +498,18 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                 {shouldShowAssistantCopyControl && (
                   <MessageSpeakControl content={assistantCopyContent} />
                 )}
+                {/* Forks up to and including this reply. */}
+                {shouldShowAssistantCopyControl && onForkFromMessage && message.transcriptAnchorId && (
+                  <button
+                    type="button"
+                    onClick={() => onForkFromMessage(message)}
+                    title={t('message.forkFromHere')}
+                    aria-label={t('message.forkFromHere')}
+                    className="rounded p-1 hover:bg-muted hover:text-foreground"
+                  >
+                    <GitBranchIcon className="h-3.5 w-3.5" />
+                  </button>
+                )}
                 {/* Which model actually answered, as the provider recorded it
                     on this row. Provenance rather than an affordance, so unlike
                     copy and speak it is not gated on the copy control, and an

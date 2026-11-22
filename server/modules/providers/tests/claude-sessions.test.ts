@@ -1743,7 +1743,7 @@ test('resolving an edit anchor returns the assistant turn before it', { concurre
   }
 });
 
-test('user turns carry the transcript uuid so they can be edited', { concurrency: false }, async () => {
+test('user turns and reply texts carry the transcript uuid', { concurrency: false }, async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'claude-anchor-ids-'));
 
   try {
@@ -1762,11 +1762,12 @@ test('user turns carry the transcript uuid so they can be edited', { concurrency
         userRows.map((message) => message.transcriptAnchorId),
         ['u1', 'u2b'],
       );
-      // Assistant rows are never an anchor: the UI only offers editing on a
-      // turn the user typed.
-      assert.equal(
-        history.messages.some((message) => message.role !== 'user' && message.transcriptAnchorId),
-        false,
+      // A reply text is a fork point too, so a fork can keep that answer.
+      assert.deepEqual(
+        history.messages
+          .filter((message) => message.role === 'assistant' && message.kind === 'text')
+          .map((message) => message.transcriptAnchorId),
+        ['a1', 'a2b'],
       );
     });
   } finally {
