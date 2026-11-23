@@ -146,14 +146,14 @@ type Props = {
   processingSessions?: SessionActivityMap;
 };
 
-const render = (initialProps: Partial<Props> = {}) => {
+const render = (initialProps: Partial<Props> = {}, provider: 'claude' | 'codex' = 'claude') => {
   const errors: ChatMessage[] = [];
   const view = renderHook(
     ({ session, isLoading, model, processingSessions }: Props) => useChatComposerState({
       selectedProject: PROJECT,
       selectedSession: session,
       currentSessionId: session.id ?? null,
-      provider: 'claude',
+      provider,
       permissionMode: 'default',
       cyclePermissionMode: () => undefined,
       resolvePermissionModeForProvider: () => 'default' as PermissionMode,
@@ -272,7 +272,8 @@ test('queueing behind background work adds to a message already waiting there', 
     'session-1',
     { statusText: null, canInterrupt: false, startedAt: 1, background: true, tasks: [] },
   ]]);
-  const { view } = render({ isLoading: false, processingSessions: background });
+  // Only providers without a kept process ask before sending over background work.
+  const { view } = render({ isLoading: false, processingSessions: background }, 'codex');
 
   const queueBehindWork = async (text: string) => {
     await act(async () => { view.result.current.setInput(text); });

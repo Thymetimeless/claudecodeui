@@ -52,14 +52,16 @@ const backgroundOnly: SessionActivityMap = new Map([[
 
 const uploads = () => vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes('/api/assets/files'));
 
-const render = (processingSessions: SessionActivityMap) => {
+// Claude keeps its process between turns, so only other providers ask before sending over
+// background work; these tests use one of them.
+const render = (processingSessions: SessionActivityMap, provider: 'claude' | 'codex' = 'codex') => {
   const sent: Array<{ type: string }> = [];
   const view = renderHook(() =>
     useChatComposerState({
       selectedProject: PROJECT,
       selectedSession: SESSION,
       currentSessionId: SESSION.id,
-      provider: 'claude',
+      provider,
       permissionMode: 'default',
       cyclePermissionMode: () => undefined,
       resolvePermissionModeForProvider: () => 'default' as PermissionMode,
@@ -206,6 +208,19 @@ test('a second submit while the prompt is open neither opens another prompt nor 
     await first;
   });
   assert.equal(sends().length, 0, 'exactly zero sends');
+});
+
+test('a Claude session with background work sends without asking: its process keeps the work running', async () => {
+  const background: SessionActivityMap = new Map([[
+    SESSION.id,
+    { statusText: null, canInterrupt: false, startedAt: 1, background: true, tasks: [] },
+  ]]);
+  const { view, sends } = render(background, 'claude');
+  await act(async () => { view.result.current.setInput('hello'); });
+  await act(async () => { await view.result.current.handleSubmit({ preventDefault: () => undefined } as never); });
+
+  assert.equal(view.result.current.backgroundSendPrompt, null);
+  assert.equal(sends().length, 1);
 });
 
 test('a session with nothing in the background sends without asking', async () => {

@@ -378,3 +378,85 @@ test('the next message runs in the live process and keeps its background work', 
     await rm(cwd, { recursive: true, force: true });
   }
 });
+
+/** A scripted CLI that can also switch model, permission mode and effort in place. */
+function switchableContext(first: ReturnType<typeof createScriptedQuery>, sent: NormalizedMessage[]): ProviderRuntimeContext {
+  const sessions = new ClaudeSessionsProvider({ getLiveRunStartTime: () => null });
+  void sent;
+  return {
+    resolveProviderSessionId: () => null,
+    resolveResumeModel: async () => undefined,
+    getProviderModels: async () => CLAUDE_PREDEFINED_MODELS as never,
+    normalizeMessage: (raw, sessionId) => sessions.normalizeMessage(raw, sessionId),
+    isProviderInstalled: async () => true,
+    createQuery: (options) => Object.assign(first.createQuery(options), {
+      setModel: async () => {},
+      setPermissionMode: async () => {},
+      applyFlagSettings: async () => {},
+    }),
+  };
+}
+const noNewProcess: NonNullable<ProviderRuntimeContext['createQuery']> = () => { throw new Error('a new process was started'); };
+const silentWriter = { send: () => {}, setSessionId: () => {}, userId: null };
+
+test('prewarm: an opened chat gets its process before the first message, which goes into it', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'claude-runtime-hold-'));
+  const first = createScriptedQuery();
+  const sent: NormalizedMessage[] = [];
+  const writer = { send: (message: NormalizedMessage) => { sent.push(message); }, userId: null };
+  const context = switchableContext(first, sent);
+  try {
+    const warmRun = queryClaudeSDK('', { sessionId: SESSION_ID, cwd, prewarm: true }, silentWriter as never, context);
+    await waitFor(() => getClaudeSDKLiveStatus(SESSION_ID).live);
+    assert.equal(getClaudeSDKLiveStatus(SESSION_ID).busy, false, 'a warm process is idle');
+    assert.equal(first.script.prompts.length, 0, 'nothing was sent to the CLI yet');
+
+    // Opening the chat again does not start another process.
+    await queryClaudeSDK('', { sessionId: SESSION_ID, cwd, prewarm: true }, silentWriter as never, { ...context, createQuery: noNewProcess });
+
+    const sendRun = queryClaudeSDK('hi', { sessionId: SESSION_ID, cwd }, writer as never, { ...context, createQuery: noNewProcess });
+    await waitFor(() => first.script.prompts.length === 1);
+    first.script.emit(init());
+    first.script.emit(result());
+    await sendRun;
+    assert.equal(sent.filter((message) => message.kind === 'complete').length, 1, 'the first message reports its end');
+
+    first.script.end();
+    await warmRun;
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
+
+test('prewarm: a new chat takes the spare process with its first message', async () => {
+  const cwd = await mkdtemp(path.join(os.tmpdir(), 'claude-runtime-hold-'));
+  const spare = createScriptedQuery();
+  const sent: NormalizedMessage[] = [];
+  const writer = { send: (message: NormalizedMessage) => { sent.push(message); }, userId: null };
+  const context = switchableContext(spare, sent);
+  const NEW_ID = 'app-new-chat';
+  try {
+    const spareRun = queryClaudeSDK('', { cwd, prewarm: true }, silentWriter as never, context);
+    await waitFor(() => spare.script.released() === false && spare.script.prompts.length === 0);
+    await settle();
+    // The CLI announces its session id while it starts (its SessionStart hooks); the spare must not
+    // register under it.
+    spare.script.emit({ type: 'system', subtype: 'hook_started', session_id: NATIVE_ID, hook_event: 'SessionStart' });
+    await settle();
+    assert.equal(getClaudeSDKLiveStatus(NATIVE_ID).live, false, 'a spare is not a session of its own');
+
+    const sendRun = queryClaudeSDK('hello', { sessionId: NEW_ID, cwd }, writer as never, { ...context, createQuery: noNewProcess });
+    await waitFor(() => spare.script.prompts.length === 1);
+    assert.equal(getClaudeSDKLiveStatus(NEW_ID).live, true, 'the new chat owns the spare now');
+    spare.script.emit(init());
+    spare.script.emit(result());
+    await sendRun;
+    assert.equal(sent.filter((message) => message.kind === 'complete').length, 1);
+
+    spare.script.end();
+    await spareRun;
+    assert.equal(getClaudeSDKLiveStatus(NEW_ID).live, false);
+  } finally {
+    await rm(cwd, { recursive: true, force: true });
+  }
+});

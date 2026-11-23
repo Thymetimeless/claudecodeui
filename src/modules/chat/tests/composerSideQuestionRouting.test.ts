@@ -71,10 +71,12 @@ type ComposerState = ReturnType<typeof useChatComposerState> & {
 
 type AddedRow = { type?: string; content?: unknown };
 
-const render = ({ isLoading, processingSessions, supportsSideQuestions = true }: {
+const render = ({ isLoading, processingSessions, supportsSideQuestions = true, provider = 'claude' }: {
   isLoading: boolean;
   processingSessions: SessionActivityMap;
   supportsSideQuestions?: boolean;
+  /** Claude sends over background work without the dialog; the dialog tests use codex. */
+  provider?: 'claude' | 'codex';
 }) => {
   const sent: Frame[] = [];
   const added: AddedRow[] = [];
@@ -86,7 +88,7 @@ const render = ({ isLoading, processingSessions, supportsSideQuestions = true }:
       selectedProject: PROJECT,
       selectedSession: SESSION,
       currentSessionId: SESSION.id,
-      provider: 'claude',
+      provider,
       permissionMode: 'default',
       cyclePermissionMode: () => undefined,
       resolvePermissionModeForProvider: () => 'default' as PermissionMode,
@@ -182,7 +184,7 @@ for (const [name, state] of [
 }
 
 test('Side question in the background-work dialog sends one chat.side_question on the current model, and nothing else', async () => {
-  const { view, of, types } = render({ isLoading: false, processingSessions: backgroundOnly });
+  const { view, of, types } = render({ isLoading: false, processingSessions: backgroundOnly, provider: 'codex' });
   await act(async () => { view.result.current.setInput('hello'); });
 
   let pending!: Promise<void>;
@@ -203,7 +205,7 @@ test('Side question in the background-work dialog sends one chat.side_question o
 });
 
 test('Queue from the send menu over background work queues without opening the dialog', async () => {
-  const { view, of, promptsSeen } = render({ isLoading: false, processingSessions: backgroundOnly });
+  const { view, of, promptsSeen } = render({ isLoading: false, processingSessions: backgroundOnly, provider: 'codex' });
   await act(async () => { view.result.current.setInput('hello'); });
 
   await choose(view, 'queue');

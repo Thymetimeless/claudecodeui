@@ -82,6 +82,22 @@ Please report problems with the changes below to this fork, not to the upstream 
   (default `3`) in the server's environment. A live process does not see changes to
   settings, plugins, skills or MCP servers until it restarts, the same as Claude Code in a
   terminal.
+- **The first message is fast too: the process starts when you open the chat.** Opening a
+  Claude chat (or pressing New Session) asks the server to start that chat's Claude process
+  right away, so its start-up (spawn, SessionStart hooks, MCP servers) happens while you type.
+  A new chat has no session id until its first message, so the server keeps one spare process
+  for it, which the first message of a new chat in the same project and account takes over. A
+  warm process nobody uses closes after `CLOUDCLI_CLAUDE_WARM_MS` (default `180000`, 3 min)
+  and is the first to close at the live limit. Opening a chat just to read it therefore starts
+  a process for a few minutes. API: `POST /api/providers/claude/warm` `{ sessionId | null,
+  projectPath, options }` (the composer's send options) returns 202.
+- **No "send over background work?" dialog for Claude.** The composer asked before sending
+  while a chat had background work, because a new turn used to stop it. A Claude chat now
+  keeps its process, so the message is sent at once and the work keeps running; other
+  providers still ask.
+- **Composer fits narrow screens.** The toolbar row under the message box wraps instead of
+  running past the edge (the send button was cut off on phones), and composer menus move
+  inward when their button sits near the left edge (the model menu ran off the left side).
 - **Faster turns: MCP servers come from Claude's own settings.** Upstream also passed every
   MCP server from `~/.claude.json` to the CLI again (`mcpServers`). Servers passed that way
   make the CLI wait until every one of them has connected before it reads the message (10+

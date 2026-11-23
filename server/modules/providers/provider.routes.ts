@@ -16,6 +16,7 @@ import { splitClaudeAccountModel } from '@/modules/providers/list/claude/claude-
 import { readClaudePlanUsageCached } from '@/modules/providers/list/claude/claude-plan-usage.js';
 import { getClaudeSDKLiveStatus } from '@/modules/providers/list/claude/claude-runtime.provider.js';
 import { sessionsDb } from '@/modules/database/index.js';
+import { providerRuntimeService } from '@/modules/providers/services/provider-runtime.service.js';
 import type {
   CustomProviderModelEffort,
   CustomProviderModelInput,
@@ -1080,6 +1081,34 @@ router.get(
   asyncHandler(async (req: Request, res: Response) => {
     const model = typeof req.query.model === 'string' ? req.query.model : '';
     res.json(createApiSuccessResponse(await readClaudePlanUsageCached(splitClaudeAccountModel(model).account)));
+  }),
+);
+
+// Prewarm: the composer asks for a Claude chat's process (or the spare for a new chat) when the
+// chat is opened, so the first message goes into a running process.
+router.post(
+  '/claude/warm',
+  asyncHandler(async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const sessionId = typeof body.sessionId === 'string' && body.sessionId ? body.sessionId : null;
+    let cwd = typeof body.projectPath === 'string' ? body.projectPath : '';
+    if (sessionId) {
+      const row = sessionsDb.getSessionById(sessionId);
+      if (!row || row.provider !== 'claude' || row.isArchived) {
+        res.status(204).end();
+        return;
+      }
+      cwd = row.project_path || cwd;
+    }
+    if (!cwd) {
+      res.status(204).end();
+      return;
+    }
+    const options = body.options && typeof body.options === 'object' ? body.options as Record<string, unknown> : {};
+    const writer = { send() {}, setSessionId() {}, userId: null };
+    Promise.resolve(providerRuntimeService.run('claude', '', { ...options, sessionId, cwd, projectPath: cwd, prewarm: true }, writer as never))
+      .catch((error: unknown) => console.warn('[prewarm] failed:', error instanceof Error ? error.message : error));
+    res.status(202).json(createApiSuccessResponse({ warming: true }));
   }),
 );
 

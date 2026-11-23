@@ -12,7 +12,7 @@ import type {
 import { useDropzone } from 'react-dropzone';
 import { useTranslation } from 'react-i18next';
 
-import { api, ApiRequestError } from '@/shared/api';
+import { api, ApiRequestError, authenticatedFetch } from '@/shared/api';
 import { PROVIDER_PERMISSION_PREFERENCE_KEYS } from '@/shared/constants';
 import { readUserPreference } from '@/shared/userSettings';
 import type { BackgroundSendChoice, BackgroundSendPrompt, CommandModalPayload, CostCommandData, HelpCommandData, MarkSessionProcessing, ModelCommandData, PendingSteer, QueuedDraft, SessionActivityMap, StatusCommandData, SteerOutcome,QueuedSendOptions,ChatAttachment,ChatMessage,PendingPermissionRequest,PermissionMode,SessionEstablishedContext,Project,ProjectSession,LLMProvider,SlashCommand } from '@/shared/types';
@@ -791,6 +791,21 @@ export function useChatComposerState({
     selectedSession,
   ]);
 
+  // Prewarm: start the Claude process of the open chat (or a spare for a new chat) before the
+  // first message, like a terminal session. Debounced; the server ignores repeats.
+  const warmSessionId = selectedSession?.id || currentSessionId || null;
+  const warmProjectPath = selectedProject ? (selectedProject.fullPath || selectedProject.path) : null;
+  useEffect(() => {
+    if (provider !== 'claude' || !warmProjectPath) return undefined;
+    const timer = setTimeout(() => {
+      void authenticatedFetch('/api/providers/claude/warm', {
+        method: 'POST',
+        body: JSON.stringify({ sessionId: warmSessionId, projectPath: warmProjectPath, options: buildSendOptions('') }),
+      }).catch(() => {});
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [provider, warmSessionId, warmProjectPath, buildSendOptions]);
+
   // Read at send time through a ref: the map changes on every poll, and a
   // submit handler rebuilt that often would re-render the whole composer.
   const processingSessionsRef = useRef(processingSessions);
@@ -1374,7 +1389,8 @@ export function useChatComposerState({
       // call, but not one to make for them — and queueing behind the work,
       // which the server holds until it finishes, is the safe alternative.
       const backgroundActivity = processingSessionsRef.current?.get(targetSessionId);
-      if (backgroundActivity?.background) {
+      // Claude keeps its process between turns, so its background work survives the next message.
+      if (backgroundActivity?.background && provider !== 'claude') {
         const work = ownBackgroundTasks(backgroundActivity.tasks ?? [])
           .map((task) => describeBackgroundTask(task, t));
         const choice = submitOptions?.presetBackgroundChoice ?? await askBeforeSendingOverBackgroundWork(work);

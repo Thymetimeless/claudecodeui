@@ -110,7 +110,7 @@ type ContinueRequest = {
   signature: string;
 };
 
-type LiveState = { idleSince: number | null; busy: boolean; expiresAt: number | null };
+type LiveState = { idleSince: number | null; busy: boolean; expiresAt: number | null; warmUnused?: boolean };
 
 /**
  * The steer entry point of a run, plus its keepalive hooks: `continueTurn` runs
@@ -427,6 +427,12 @@ export function buildClaudeSdkEnv(hostEnv: NodeJS.ProcessEnv = process.env): Nod
 // CLOUDCLI_CLAUDE_MAX_LIVE sessions are live (oldest idle first).
 const KEEPALIVE_MS = Number(process.env.CLOUDCLI_CLAUDE_KEEPALIVE_MS) || 30 * 60 * 1000;
 const MAX_LIVE_SESSIONS = Number(process.env.CLOUDCLI_CLAUDE_MAX_LIVE) || 3;
+// Prewarm: a chat's process is started when the chat is opened, before its first message. One
+// that nobody uses closes after CLOUDCLI_CLAUDE_WARM_MS and is the first to go at the limit.
+const WARM_MS = Number(process.env.CLOUDCLI_CLAUDE_WARM_MS) || 3 * 60 * 1000;
+
+/** The warm process for the next new chat (a new chat has no session id until its first send). */
+let spare: { signature: string; adopt: (appSessionId: string) => void; release: () => void } | null = null;
 
 /** What a live process cannot change: a message whose signature differs starts a new process. */
 async function spawnSignature(sdkOptions: AnyRecord): Promise<string> {
@@ -450,10 +456,17 @@ function closeIdleSessions(exceptKey: string | null) {
     if (key === exceptKey || entry.status !== 'active') continue;
     live++;
     const state = entry.steerInput?.liveState?.();
-    if (state?.idleSince && !backgroundWork.hasOutstanding(key)) idle.push([state.idleSince, key]);
+    if (state?.idleSince && !backgroundWork.hasOutstanding(key)) idle.push([state.warmUnused ? 0 : state.idleSince, key]);
   }
-  const over = live - MAX_LIVE_SESSIONS + 1;
+  if (spare) live++;
+  let over = live - MAX_LIVE_SESSIONS + 1;
   if (over <= 0) return;
+  if (spare) {
+    console.log(`[prewarm] closing the spare process (max ${MAX_LIVE_SESSIONS} live)`);
+    spare.release();
+    spare = null;
+    over--;
+  }
   idle.sort((a, b) => a[0] - b[0]);
   for (const [, key] of idle.slice(0, over)) {
     console.log(`[keepalive] closing idle session ${key} (max ${MAX_LIVE_SESSIONS} live)`);
@@ -1265,7 +1278,7 @@ async function queryClaudeSDK(
   ws: ClaudeRuntimeWriter,
   context: ProviderRuntimeContext,
 ): Promise<void> {
-  const { sessionId } = options;
+  let { sessionId } = options;
   let { sessionSummary } = options;
   // Callers pass the stable app session id; the SDK only understands the
   // provider-native id recorded on the session row.
@@ -1323,6 +1336,10 @@ async function queryClaudeSDK(
   let turnWaiters: Array<() => void> = [];
   let cliBusy = false;
   let skipResults = 0;
+  // Prewarm: started before any message and not used yet; a spare not yet adopted by a chat.
+  let warmUnused = false;
+  let isSpare = false;
+  let mySpare: typeof spare = null;
   const settleTurnWaiters = () => {
     const waiters = turnWaiters;
     turnWaiters = [];
@@ -1395,7 +1412,7 @@ async function queryClaudeSDK(
     idleReleaseTimer = setTimeout(() => {
       idleReleaseTimer = null;
       maybeReleasePromptStream(true);
-    }, idleSince ? KEEPALIVE_MS : BG_WAIT_CEILING_MS);
+    }, idleSince ? (warmUnused ? WARM_MS : KEEPALIVE_MS) : BG_WAIT_CEILING_MS);
     // Never let the hold keep the server process alive on its own.
     idleReleaseTimer?.unref?.();
   };
@@ -1461,7 +1478,23 @@ async function queryClaudeSDK(
     // differs; otherwise release that process (stopping its background work) and start one.
     const signature = await spawnSignature(sdkOptions);
     {
-      const held = sessionKey() ? getSession(sessionKey()!) : undefined;
+      let held = sessionKey() ? getSession(sessionKey()!) : undefined;
+      if (options.prewarm) {
+        // Already warm: this chat has a live process, or the spare matches.
+        if (held?.status === 'active' || (!sessionKey() && spare?.signature === signature)) {
+          return;
+        }
+        if (!sessionKey() && spare) {
+          spare.release();
+          spare = null;
+        }
+      } else if (sessionId && !held && !providerSessionId && spare?.signature === signature
+        && !options.resumeAnchorId && !options.resumeFromScratch) {
+        const take = spare;
+        spare = null;
+        take.adopt(sessionId);
+        held = getSession(sessionId);
+      }
       const continueTurn = held?.status === 'active' ? held.steerInput?.continueTurn : undefined;
       if (continueTurn && !options.resumeAnchorId && !options.resumeFromScratch) {
         const continued = await continueTurn({ command, options, ws, sdkOptions, signature });
@@ -1476,7 +1509,7 @@ async function queryClaudeSDK(
       closeIdleSessions(sessionKey());
     }
 
-    const promptMessages = await buildPromptMessages(command, options.images, options.files, options.cwd);
+    const promptMessages = options.prewarm ? [] : await buildPromptMessages(command, options.images, options.files, options.cwd);
 
     sdkOptions.hooks = {
       Notification: [{
@@ -1701,7 +1734,8 @@ async function queryClaudeSDK(
     steerIntoTurn.liveState = () => ({
       idleSince,
       busy: !turnCompleteSent || cliBusy,
-      expiresAt: idleSince ? idleSince + KEEPALIVE_MS : null,
+      warmUnused,
+      expiresAt: idleSince ? idleSince + (warmUnused ? WARM_MS : KEEPALIVE_MS) : null,
     });
     steerIntoTurn.continueTurn = async ({ command: nextCommand, options: nextOptions, ws: nextWs, sdkOptions: next, signature: nextSignature }) => {
       if (!turnCompleteSent || nextSignature !== signature || pendingSteerIds.size > 0) {
@@ -1751,6 +1785,7 @@ async function queryClaudeSDK(
       backgroundWorkPending = false;
       sawTaskEventThisTurn = false;
       idleSince = null;
+      warmUnused = false;
       skipResults = cliBusy ? 1 : 0;
       if (idleReleaseTimer) {
         clearTimeout(idleReleaseTimer);
@@ -1758,6 +1793,28 @@ async function queryClaudeSDK(
       }
       return { done: new Promise<void>((resolve) => turnWaiters.push(resolve)) };
     };
+
+    if (options.prewarm) {
+      // Started before any message: idle from the start, so the first message continues it.
+      turnCompleteSent = true;
+      idleSince = Date.now();
+      warmUnused = true;
+      scheduleRelease();
+      if (!sessionKey()) {
+        isSpare = true;
+        const instance = queryInstance;
+        mySpare = {
+          signature,
+          adopt: (appSessionId: string) => {
+            sessionId = appSessionId;
+            isSpare = false;
+            addSession(appSessionId, instance, ws, releasePromptStream, steerIntoTurn);
+          },
+          release: () => maybeReleasePromptStream(true),
+        };
+        spare = mySpare;
+      }
+    }
 
     // Track the query instance for abort capability
     if (sessionKey()) {
@@ -1850,7 +1907,9 @@ async function queryClaudeSDK(
       if (message.session_id && !capturedSessionId) {
 
         capturedSessionId = message.session_id;
-        addSession(sessionKey()!, queryInstance, ws, releasePromptStream, steerIntoTurn);
+        if (!isSpare) {
+          addSession(sessionKey()!, queryInstance, ws, releasePromptStream, steerIntoTurn);
+        }
 
         // Set session ID on writer
         if (ws.setSessionId && typeof ws.setSessionId === 'function') {
@@ -2101,6 +2160,9 @@ async function queryClaudeSDK(
     }
     releasePromptStream();
     settleTurnWaiters();
+    if (mySpare && spare === mySpare) {
+      spare = null;
+    }
   }
 }
 
