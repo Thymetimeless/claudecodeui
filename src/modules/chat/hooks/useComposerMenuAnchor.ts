@@ -29,7 +29,9 @@ export function useComposerMenuAnchor(
       return;
     }
 
-    const right = Math.max(VIEWPORT_MARGIN, window.innerWidth - rect.right);
+    // Keep the whole menu on screen: a button near the left edge (phones) moves the anchor right.
+    const width = Math.min(preferredWidth, window.innerWidth - 2 * VIEWPORT_MARGIN);
+    const right = Math.max(VIEWPORT_MARGIN, Math.min(window.innerWidth - rect.right, window.innerWidth - VIEWPORT_MARGIN - width));
     setAnchor({
       right,
       bottom: window.innerHeight - rect.top + MENU_GAP,
